@@ -97,7 +97,7 @@ def main():
                     current_price= position.price_current
                     symbol_info = mt5.symbol_info(symbol) 
                     if symbol_info is None: 
-                        print(symbol_info, "symbol not found") 
+                        print(symbol, "symbol not found") 
                     else: 
                         point = mt5.symbol_info(symbol).point 
 
@@ -123,11 +123,11 @@ def main():
 
                     # Check if current price has crossed the new stop loss value
                     if position.type == mt5.POSITION_TYPE_BUY and current_price is not None and current_price < (current_sl - atr_value):
-                        message = f"{symbol} LONG\nentry price: {open_price}\ncurrent ATR: {atr_value}%\nprice needed for SL to start trailing: {round(sl_activation_long,5)}"
+                        message = f"{symbol} LONG\nentry price: {open_price}\ncurrent ATR: {atr_value}\nprice needed for SL to start trailing: {round(sl_activation_long,5)}"
                         print(message)  # print message to console for verification
                         mt5.message_add("Trailing SL Alert", message)  # send message as alert in MT5 terminal
                     elif position.type == mt5.POSITION_TYPE_SELL and current_price is not None and current_price > (current_sl + atr_value):
-                        message = f"{symbol} SHORT\nentry price: {open_price}\ncurrent ATR: {atr_value}%\nprice needed for SL to start trailing: {round(sl_activation_short,5)}"
+                        message = f"{symbol} SHORT\nentry price: {open_price}\ncurrent ATR: {atr_value}\nprice needed for SL to start trailing: {round(sl_activation_short,5)}"
                         print(message)
                     
                     # Create initial stop loss if it doesn't exist and set it in profit
