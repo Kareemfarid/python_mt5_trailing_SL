@@ -114,7 +114,7 @@ def main():
                         trail_distance= 0.5 * atr_value
 
                         sl_activation_long = open_price + trail_activation + spread_adjustment
-                        sl_activation_short = open_price - trail_activation + spread_adjustment
+                        sl_activation_short = open_price - (trail_activation + spread_adjustment)
                         print(f"current_atr {round(atr_value,5)} current spread {+ symbol_info.spread}")
 
                     
@@ -138,7 +138,7 @@ def main():
 
                         # Trailing stop loss for a buy order
                         if position.type == mt5.POSITION_TYPE_BUY:
-                            profit = (current_price - open_price) / open_price * 100
+                            profit = (current_price - open_price) 
                             if profit > atr_value:
                                 new_sl = current_price - trail_distance
                                 if (current_price - new_sl) >= trail_step and (new_sl > current_sl):
@@ -147,7 +147,7 @@ def main():
 
                         # Trailing stop loss for a sell order
                         elif position.type == mt5.POSITION_TYPE_SELL:
-                            profit = (open_price - current_price) / open_price * 100
+                            profit = (open_price - current_price) 
                             if profit > atr_value:
                                 new_sl = current_price + trail_distance
                                 if (new_sl - current_price) >= trail_step and (new_sl < current_sl):
