@@ -2,24 +2,44 @@ import time
 import numpy as np
 import pandas as pd
 import MetaTrader5 as mt5
-
-
+from telegram import Bot
+from telegram import InputTextMessageContent
+import asyncio
 
 # Initialize the connection
 mt5.initialize()
-# Add a helper function to calculate the ATR
 
+# Set ATR parameters
+atr_period = 7
+atr_timeframe = mt5.TIMEFRAME_M15
+trailing_enabled = True
+trailing_activation_input= 0.3 #this value will be multiplied by the atr value of the selected time frame
+trailing_step_input=0.001
+trailing_distace_input=0.2
+
+TELEGRAM_BOT_TOKEN = "YOUR TELEGRAM BOT TOKEN"
+TELEGRAM_CHAT_ID = "-YOUR CHAT ID"
+
+bot = Bot(token=TELEGRAM_BOT_TOKEN)
+
+async def send_telegram_message(text):
+    try:
+        bot = Bot(token=TELEGRAM_BOT_TOKEN)
+        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text)
+    except Exception as e:
+        print(f"Error sending Telegram message: {e}")
+        
+# Add a helper function to calculate the ATR
 def calculate_atr(symbol, timeframe, period):
-    
     rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, period + 1)
     df = pd.DataFrame(rates, columns=["time", "open", "high", "low", "close", "tick_volume", "spread", "real_volume"])
-    
+
     # Calculate True Range
     df["tr0"] = abs(df["high"] - df["low"])
     df["tr1"] = abs(df["high"] - df["close"].shift())
     df["tr2"] = abs(df["low"] - df["close"].shift())
     df["tr"] = df[["tr0", "tr1", "tr2"]].max(axis=1)
-    
+
     if len(df) < period:
         return np.nan
 
@@ -27,7 +47,6 @@ def calculate_atr(symbol, timeframe, period):
     atr = df["tr"].rolling(period).mean().iloc[-1]
 
     return atr
-
 
 def create_sl_order(ticket, symbol, sl_price, sl_type):
     request = {
@@ -42,128 +61,164 @@ def create_sl_order(ticket, symbol, sl_price, sl_type):
         "type_filling": mt5.ORDER_FILLING_RETURN,
     }
     result = mt5.order_send(request)
-    if result.retcode is not None and result.retcode != mt5.TRADE_RETCODE_DONE:
-        print(f"Failed to create SL order for ticket {ticket}, error code: {result.retcode}")
+    if result is None:
+        print(f"Failed to create/modify SL order for ticket {ticket}")
+    elif result.retcode != mt5.TRADE_RETCODE_DONE:
+        print(f"Failed to create/modify SL order for ticket {ticket}, error code: {result.retcode}")
     else:
-        print(f"SL order created for ticket {symbol}, {time}, sl price {sl_price}")
+        print(f"SL order created/modified for ticket {symbol}, {time}, sl price {sl_price}")
+        asyncio.run(send_telegram_message(f"SL order created/modified for ticket {symbol}, {time}, sl price {sl_price}"))
+
+
 
 def modify_sl_order(ticket, symbol, sl_price, sl_type):
-    sl_order = mt5.orders_get(symbol=symbol, magic=0, comment="SL order")
-    if sl_order is not None and len(sl_order) > 0:
-        order = sl_order[0]
-        if order.price != sl_price:
-            request = {
-                "action": mt5.TRADE_ACTION_SLTP,
-                "symbol": symbol,
-                "position": ticket,
-                "order": order.ticket,
-                "sl": sl_price,
-                "type": sl_type,
-                "magic": 0,
-                "comment": "SL order",
-                "type_time": mt5.ORDER_TIME_GTC,
-                "type_filling": mt5.ORDER_FILLING_RETURN,
-            }
-            result = mt5.order_send(request)
-            if result.retcode != mt5.TRADE_RETCODE_DONE:
-                print(f"Failed to modify SL order for ticket {ticket}, error code: {result.retcode}")
-            else:
-                print(f"SL order modified for ticket {symbol}, {time}, sl price {sl_price}")
+
+    if sl_price is not None:
+
+        print(ticket)
+        asyncio.run(send_telegram_message(f"order data for debugging the trailing error {ticket}"))
+     
+        request = {
+             "action": mt5.TRADE_ACTION_SLTP,
+             "symbol": symbol,
+             "position": ticket,
+             "sl": sl_price,
+             "type": sl_type,
+             "magic": 0,
+             "comment": "SL order",
+             "type_time": mt5.ORDER_TIME_GTC,
+             "type_filling": mt5.ORDER_FILLING_RETURN,
+        }
+        result = mt5.order_send(request)
+        if result.retcode != mt5.TRADE_RETCODE_DONE:
+            print(f"Failed to modify SL order for ticket {ticket}, error code: {result.retcode}")
+            asyncio.run(send_telegram_message(f"Failed to modify SL order for ticket {ticket}, error code: {result.retcode}"))
+        else:
+            print(f"SL order modified for ticket {symbol}, {time}, sl price {sl_price}")
+            asyncio.run(send_telegram_message(f"SL order modified for ticket {symbol}, {time}, sl price {sl_price}"))
     else:
         create_sl_order(ticket, symbol, sl_price, sl_type)
 
 
+def close_position_with_retry(request, max_retries=3, retry_interval_seconds=5):
+    retry_count = 0
+    while retry_count < max_retries:
+        result = mt5.order_send(request)
+        if result is None:
+            print("Failed to place tp, result object is None")
+            print("Last error:", mt5.last_error())
+        elif result.retcode != mt5.TRADE_RETCODE_DONE:
+            print(f"Failed to place tp , error code: {result.retcode}")
+        else:
+            return result
 
+        retry_count += 1
+        time.sleep(retry_interval_seconds)
+
+    return None
 
 def main():
     print("Starting the trailing stop loss script...")
-    update_interval_seconds = 5
+    update_interval_seconds = 1
+    tp_executed = {}  # Keep track of executed TP levels
 
-    try:
-        while True:
-            positions = mt5.positions_get()
-            if positions is not None and len(positions) > 0:
-                print(f"{len(positions)} open position(s) found.")
-                for position in positions:
-                    try:
-                        symbol = position.symbol
-                        ticket = position.ticket
-                        volume = position.volume
-                        current_sl = position.sl
-                        open_price = position.price_open
-                        current_price= position.price_current
-                        symbol_info = mt5.symbol_info(symbol) 
-                        if symbol_info is None: 
-                            print(symbol, "symbol not found") 
-                        else: 
-                            point = mt5.symbol_info(symbol).point
-                        spread_adjustment= symbol_info.spread * point
-
-                        print(f" info updated succesfully for symbol {symbol}")
-
-
-                        print(f"position info {symbol}, volume {volume}, open price {open_price}, current SL {current_sl},current price {position.price_current}, current spread {symbol_info.spread}")
-
-                        # Set ATR parameters
-                        atr_period = 14
-                        atr_timeframe = mt5.TIMEFRAME_M1
-                        
-                        atr_value = calculate_atr(symbol, atr_timeframe, atr_period) # calculate ATR
-                        trail_activation= 1 * atr_value 
-                        trail_step = 0.2 * atr_value  # set ATR percentage
-                        trail_distance= 0.5 * atr_value
-
-                        sl_activation_long = open_price + trail_activation + spread_adjustment
-                        sl_activation_short = open_price - (trail_activation + spread_adjustment)
-                        print(f"current_atr {round(atr_value,5)} current spread {+ symbol_info.spread}")
-
+    while True:
+        positions = mt5.positions_get()
+        
+        if positions is not None and len(positions) > 0:
+            print(f"{len(positions)} open position(s) found.")
+            for position in positions:
+                try:
+                    symbol = position.symbol
+                    ticket = position.ticket
+                    volume = position.volume
+                    current_sl = position.sl
+                    open_price = position.price_open
                     
+                    ask_price = mt5.symbol_info_tick(symbol).ask
+                    bid_price = mt5.symbol_info_tick(symbol).bid
+                    current_price = (bid_price + ask_price) / 2
+                    
+                    buy_qty, buy_avg_price, sell_qty, sell_avg_price = 0, 0, 0, 0
 
-                        # Check if current price has crossed the new stop loss value
-                        if position.type == mt5.POSITION_TYPE_BUY and current_price is not None and current_price < (sl_activation_long):
-                            message = f"{symbol} LONG\nentry price: {open_price}\ncurrent ATR: {atr_value}\n price needed for SL to start trailing: {round(sl_activation_long,5)}"
-                            print(message)  # print message to console for verification
-                        elif position.type == mt5.POSITION_TYPE_SELL and current_price is not None and current_price > (sl_activation_short):
-                            message = f"{symbol} SHORT\nentry price: {open_price}\ncurrent ATR: {atr_value}\n price needed for SL to start trailing: {round(sl_activation_short,5)}"
-                            print(message)
-                        
-                        # Create initial stop loss if it doesn't exist and set it in profit
-                        if current_sl == 0:
-                            if position.type == mt5.POSITION_TYPE_BUY and current_price > sl_activation_long:
-                                initial_sl = current_price - trail_distance
-                                create_sl_order(ticket, symbol, initial_sl, mt5.ORDER_TYPE_BUY)
-                            elif position.type == mt5.POSITION_TYPE_SELL and current_price < sl_activation_short:
-                                initial_sl = current_price + trail_distance
-                                create_sl_order(ticket, symbol, initial_sl, mt5.ORDER_TYPE_SELL)
-
-                        # Trailing stop loss for a buy order
-                        if position.type == mt5.POSITION_TYPE_BUY:
-                            profit = (current_price - open_price) 
-                            if profit > atr_value:
-                                new_sl = current_price - trail_distance
-                                if (current_price - new_sl) >= trail_step and (new_sl > current_sl):
-                                    # Modify stop loss
-                                    modify_sl_order(ticket, symbol, new_sl, mt5.ORDER_TYPE_BUY)
-
-                        # Trailing stop loss for a sell order
-                        elif position.type == mt5.POSITION_TYPE_SELL:
-                            profit = (open_price - current_price) 
-                            if profit > atr_value:
-                                new_sl = current_price + trail_distance
-                                if (new_sl - current_price) >= trail_step and (new_sl < current_sl):
-                                    # Modify stop loss
-                                    modify_sl_order(ticket, symbol, new_sl, mt5.ORDER_TYPE_SELL)
-                    except Exception as e:
-                            print(f"Error processing position {symbol}:{e}")
-            else:
-                print("No open positions found.")
+                    symbol_info = mt5.symbol_info(symbol) 
+                    if symbol_info is None: 
+                        print(symbol, "symbol not found") 
+                    else: 
+                        point = mt5.symbol_info(symbol).point
+                    spread_adjustment = symbol_info.spread * point
+                    min_volume= symbol_info.volume_min
+                    max_volume= symbol_info.volume_max
+                    vol_step= symbol_info.volume_step
+                    
+                    
+                    atr_value = calculate_atr(symbol, atr_timeframe, atr_period) # calculate ATR
 
 
-            time.sleep(update_interval_seconds)
-    except KeyboardInterrupt:
-        print("Exiting...")
+                    # Calculate total size and average price for open trades
+                    orders = mt5.positions_get(symbol=symbol)
+                    for order in orders:
+                        if order.type == mt5.POSITION_TYPE_BUY:
+                            buy_qty += order.volume
+                            buy_avg_price += order.price_open * order.volume
+                        elif order.type == mt5.POSITION_TYPE_SELL:
+                            sell_qty += order.volume
+                            sell_avg_price += order.price_open * order.volume
+                    if buy_qty > 0:
+                        buy_avg_price /= buy_qty
+                    if sell_qty > 0:
+                        sell_avg_price /= sell_qty
+
+                    # Trail stop loss
+                    trail_activation = trailing_activation_input * atr_value 
+                    trail_step = trailing_step_input * atr_value  # set ATR percentage
+                    trail_distance = trailing_distace_input * atr_value
+                    sl_activation_long = buy_avg_price + trail_activation + spread_adjustment
+                    sl_activation_short = sell_avg_price - (trail_activation + spread_adjustment)
+                    # Check if current price has crossed the new stop loss value
+                    if trailing_enabled == True and position.type == mt5.POSITION_TYPE_BUY and ask_price is not None and ask_price < sl_activation_long:
+                        message = f"Total size for {symbol}: {buy_qty}, buy average price: {buy_avg_price},current ATR: {atr_value}\nprice needed for SL to start trailing: {round(sl_activation_long,5)}"
+                      
+                        print(message)  # print message to console for verification
+                      
+                    elif trailing_enabled == True and position.type == mt5.POSITION_TYPE_SELL and bid_price is not None and bid_price > sl_activation_short:
+                        message = f"Total size for {symbol}: {sell_qty}, sell average price: {sell_avg_price}, current ATR: {atr_value}\nprice needed for SL to start trailing: {round(sl_activation_short,5)}"
+                      
+
+                        print(message)
+                    # Create initial stop loss if it doesn't exist and set it in profit
+                    if current_sl == 0:
+                        if trailing_enabled == True and position.type == mt5.POSITION_TYPE_BUY and ask_price > sl_activation_long:
+                            initial_sl = ask_price - trail_distance
+                            create_sl_order(ticket, symbol, initial_sl, mt5.ORDER_TYPE_BUY)
+                        elif trailing_enabled == True and position.type == mt5.POSITION_TYPE_SELL and bid_price < sl_activation_short:
+                            initial_sl = bid_price + trail_distance
+                            create_sl_order(ticket, symbol, initial_sl, mt5.ORDER_TYPE_SELL)
+
+                    # Trailing stop loss for a buy order
+                    if trailing_enabled == True and position.type == mt5.POSITION_TYPE_BUY and ask_price > sl_activation_long:
+                        new_sl = ask_price - trail_distance
+                        if (ask_price - new_sl) >= trail_step and (new_sl > current_sl) and (new_sl > buy_avg_price):
+                            # Modify stop loss
+                            modify_sl_order(ticket, symbol, new_sl, mt5.ORDER_TYPE_BUY)
+
+                    # Trailing stop loss for a sell order
+                    elif trailing_enabled == True and position.type == mt5.POSITION_TYPE_SELL and bid_price < sl_activation_short:
+                        new_sl = bid_price + trail_distance
+                        if (new_sl - bid_price) >= trail_step and (new_sl < current_sl) and (new_sl < sell_avg_price):
+                            # Modify stop loss
+                            modify_sl_order(ticket, symbol, new_sl, mt5.ORDER_TYPE_SELL)
+                except Exception as e:
+                    print(f"Error processing position {symbol}: {e}")
+                    asyncio.run(send_telegram_message(f"Error processing position {symbol}: {e}"))
+        
+
+
+        time.sleep(update_interval_seconds)
 
 if __name__ == "__main__":
     main()
-# Deinitialize the connection to the trading platform
+
 mt5.shutdown()
+
+
